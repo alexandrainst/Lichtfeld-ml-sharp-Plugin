@@ -34,3 +34,5 @@ sharp_frames_*/
 
 # Logs
 *.log
+pyrightconfig.json
+uv.lock

@@ -9,25 +9,22 @@ import lichtfeld as lf
 
 from .panels import SharpVideoPanel
 
-_panel_class = None
+_classes = [SharpVideoPanel]
 
 
 def on_load():
     """Called when plugin loads."""
-    global _panel_class
-
-    _panel_class = SharpVideoPanel
-    lf.ui.register_panel(SharpVideoPanel)
+    for cls in _classes:
+        lf.register_class(cls)
+    lf.ui.set_panel_space(SharpVideoPanel.idname, "MAIN_PANEL_TAB")
+    lf.ui.set_panel_order(SharpVideoPanel.idname, 10000)
     lf.log.info("Sharp 4D Video plugin loaded")
 
 
 def on_unload():
     """Called when plugin unloads."""
-    global _panel_class
-
-    if _panel_class:
-        lf.ui.unregister_panel(_panel_class)
-        _panel_class = None
+    for cls in reversed(_classes):
+        lf.unregister_class(cls)
     lf.log.info("Sharp 4D Video plugin unloaded")
 
 

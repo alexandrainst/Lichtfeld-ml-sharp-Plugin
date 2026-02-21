@@ -2,7 +2,6 @@
 SHARP 4D Video Processor using the SHARP CLI.
 """
 
-import sys
 import os
 import shutil
 import tempfile
@@ -12,14 +11,6 @@ import imageio.v2 as imageio
 import imageio_ffmpeg
 import torch
 from pathlib import Path
-from tqdm import tqdm
-from unittest.mock import patch
-
-# Ensure ml-sharp is in path
-_THIS_DIR = Path(__file__).parent.resolve()
-_ML_SHARP_SRC = _THIS_DIR / "ml-sharp" / "src"
-if str(_ML_SHARP_SRC) not in sys.path:
-    sys.path.insert(0, str(_ML_SHARP_SRC))
 
 # Import the CLI command and utilities directly
 from sharp.cli.predict import predict_image, DEFAULT_MODEL_URL
@@ -31,18 +22,65 @@ from plyfile import PlyData
 # Force imageio to use the ffmpeg binary from the imageio-ffmpeg package
 os.environ["IMAGEIO_FFMPEG_EXE"] = imageio_ffmpeg.get_ffmpeg_exe()
 
+def probe_video_metadata(video_path: str | Path) -> tuple[float, int]:
+    """
+    Return (fps, total_frames) for a video path.
+    """
+    reader = imageio.get_reader(str(video_path), format="ffmpeg")
+    try:
+        meta = reader.get_meta_data() or {}
+        fps = float(meta.get("fps", 30.0) or 30.0)
+        total_frames = 0
+
+        try:
+            total_frames = int(reader.count_frames())
+        except Exception:
+            nframes = meta.get("nframes")
+            if isinstance(nframes, (int, float)) and nframes > 0:
+                total_frames = int(nframes)
+
+        if total_frames <= 0:
+            total_frames = 0
+            for _ in reader:
+                total_frames += 1
+
+        return fps, total_frames
+    finally:
+        reader.close()
+
 class SharpProcessor:
     def __init__(self):
         # We don't want to reset basicConfig if LFS has set it up, but we get a logger
         self.logger = logging.getLogger("SharpProcessor")
 
-    def process_video(self, video_path: str, output_dir: str, progress_callback=None) -> tuple[list[str], float]:
+    def _load_predictor(self):
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.logger.info(f"Using device: {device}")
+        state_dict = torch.hub.load_state_dict_from_url(DEFAULT_MODEL_URL, progress=False)
+        gaussian_predictor = create_predictor(PredictorParams())
+        gaussian_predictor.load_state_dict(state_dict)
+        gaussian_predictor.eval()
+        gaussian_predictor.to(device)
+        return gaussian_predictor, torch.device(device)
+
+    def process_video(
+        self,
+        video_path: str,
+        output_dir: str,
+        progress_callback=None,
+        max_frames: int | None = None,
+    ) -> tuple[list[str], float]:
         """
         Process a video file using the 'sharp predict' CLI command (in-process).
         """
         video_path = Path(video_path)
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
+        if max_frames is not None and max_frames <= 0:
+            raise ValueError("max_frames must be > 0 when provided")
+
+        for old_ply in output_dir.glob("frame_*.ply"):
+            old_ply.unlink()
 
         # 1. Create temporary directory for frames
         temp_dir = Path(tempfile.mkdtemp(prefix="sharp_frames_"))
@@ -62,9 +100,23 @@ class SharpProcessor:
             except:
                 total_frames = 0
 
+            if max_frames is None:
+                extract_total = total_frames
+                extract_total_msg = total_frames if total_frames > 0 else None
+            else:
+                extract_total = min(total_frames, max_frames) if total_frames > 0 else max_frames
+                extract_total_msg = extract_total if extract_total > 0 else max_frames
+
             for i, frame in enumerate(reader):
+                if max_frames is not None and i >= max_frames:
+                    break
+
                 if progress_callback:
-                    progress_callback(i, total_frames, f"Extracting frame {i+1}")
+                    if extract_total_msg:
+                        msg = f"Extracting frame {i+1}/{extract_total_msg}"
+                    else:
+                        msg = f"Extracting frame {i+1}"
+                    progress_callback(i, extract_total, msg)
                 
                 frame_path = temp_dir / f"frame_{i:05d}.jpg"
                 imageio.imsave(frame_path, frame)
@@ -80,18 +132,11 @@ class SharpProcessor:
             if total_frames == 0:
                 raise RuntimeError(f"No frames found in {temp_dir}")
 
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            self.logger.info(f"Using device: {device}")
-
             # Load model
             if progress_callback:
                 progress_callback(0, total_frames, "Loading SHARP model...")
             
-            state_dict = torch.hub.load_state_dict_from_url(DEFAULT_MODEL_URL, progress=False)
-            gaussian_predictor = create_predictor(PredictorParams())
-            gaussian_predictor.load_state_dict(state_dict)
-            gaussian_predictor.eval()
-            gaussian_predictor.to(device)
+            gaussian_predictor, torch_device = self._load_predictor()
 
             for i, image_path in enumerate(image_paths):
                 if progress_callback:
@@ -102,7 +147,7 @@ class SharpProcessor:
                 height, width = image.shape[:2]
                 
                 # Predict Gaussians
-                gaussians = predict_image(gaussian_predictor, image, f_px, torch.device(device))
+                gaussians = predict_image(gaussian_predictor, image, f_px, torch_device)
                 
                 # Save as PLY
                 save_ply(gaussians, f_px, (height, width), output_dir / f"{image_path.stem}.ply")
@@ -122,6 +167,38 @@ class SharpProcessor:
             # Cleanup temp frames
             if temp_dir.exists():
                 shutil.rmtree(temp_dir)
+
+    def process_image(self, image_path: str, output_dir: str, progress_callback=None) -> list[str]:
+        """
+        Process a single image file and export one Gaussian Splat PLY.
+        """
+        image_path = Path(image_path)
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        if progress_callback:
+            progress_callback(0, 1, "Loading SHARP model...")
+
+        gaussian_predictor, torch_device = self._load_predictor()
+
+        if progress_callback:
+            progress_callback(0, 1, "Running SHARP Inference...")
+
+        image, _, f_px = io.load_rgb(image_path)
+        height, width = image.shape[:2]
+        gaussians = predict_image(gaussian_predictor, image, f_px, torch_device)
+
+        output_path = output_dir / f"{image_path.stem}.ply"
+        save_ply(gaussians, f_px, (height, width), output_path)
+
+        del gaussian_predictor
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        if progress_callback:
+            progress_callback(1, 1, "Complete")
+
+        return [str(output_path)]
 
 def load_gaussian_ply(ply_path):
     """
