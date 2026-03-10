@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 LichtFeld Studio Authors
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Sharp 4D Video Panel."""
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
 
 import threading
 import time
