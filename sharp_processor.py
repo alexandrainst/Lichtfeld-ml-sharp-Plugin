@@ -67,7 +67,7 @@ class SharpProcessor:
         )
         urllib.request.install_opener(opener)
     
-        state_dict = torch.hub.load_state_dict_from_url(DEFAULT_MODEL_URL, progress=False)
+        state_dict = torch.hub.load_state_dict_from_url(DEFAULT_MODEL_URL, progress=True)
     
         gaussian_predictor = create_predictor(PredictorParams())
         gaussian_predictor.load_state_dict(state_dict)
