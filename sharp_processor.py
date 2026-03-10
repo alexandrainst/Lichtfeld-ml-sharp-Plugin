@@ -54,13 +54,26 @@ class SharpProcessor:
         self.logger = logging.getLogger("SharpProcessor")
 
     def _load_predictor(self):
+        import ssl
+        import urllib.request
+    
         device = "cuda" if torch.cuda.is_available() else "cpu"
         self.logger.info(f"Using device: {device}")
+    
+        # TEMP: disable SSL verification for model download
+        ssl_context = ssl._create_unverified_context()
+        opener = urllib.request.build_opener(
+            urllib.request.HTTPSHandler(context=ssl_context)
+        )
+        urllib.request.install_opener(opener)
+    
         state_dict = torch.hub.load_state_dict_from_url(DEFAULT_MODEL_URL, progress=False)
+    
         gaussian_predictor = create_predictor(PredictorParams())
         gaussian_predictor.load_state_dict(state_dict)
         gaussian_predictor.eval()
         gaussian_predictor.to(device)
+    
         return gaussian_predictor, torch.device(device)
 
     def process_video(
