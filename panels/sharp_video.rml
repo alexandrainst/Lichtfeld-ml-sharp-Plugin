@@ -1,0 +1,96 @@
+<rml>
+<body id="body" data-model="sharp_video">
+<div id="content-wrap">
+<div id="content">
+
+  <span class="sharp-title text-accent">Sharp 4D Media</span>
+  <span class="sharp-subtitle text-muted">Select one media file (.mp4 or image). The plugin auto-detects the type and runs the correct pipeline.</span>
+
+  <div class="separator"></div>
+
+  <div class="stage-strip">
+    <span class="stage-chip stage-idle" data-if="is_stage_idle">Stage: Idle</span>
+    <span class="stage-chip stage-processing" data-if="is_stage_processing">Stage: Processing</span>
+    <span class="stage-chip stage-playing" data-if="is_stage_playing">Stage: Playing</span>
+    <span class="stage-chip stage-error" data-if="is_stage_error">Stage: Error</span>
+  </div>
+
+  <div class="section-card">
+    <span class="section-label text-accent">Media File</span>
+
+    <button class="btn btn--primary btn--full sharp-btn" data-event-click="select_video">Select Video File (.mp4)</button>
+    <button class="btn btn--full sharp-btn" data-event-click="select_image">Select Image File</button>
+    <button class="btn btn--full sharp-btn sharp-btn--secondary" data-event-click="clear_input">Clear</button>
+
+    <span class="sharp-help text-muted">Supported: .mp4, .jpg, .jpeg, .png, .bmp, .tif, .tiff, .webp, .heic</span>
+    <span class="sharp-meta text-default">Detected Type: {{detected_type_text}}</span>
+    <span class="path-label text-muted">Selected Path</span>
+    <div class="path-box" data-attr-title="input_path_text">
+      <span class="path-text text-default">{{input_path_text}}</span>
+    </div>
+
+    <span class="status-inline status-success" data-if="show_video_config">Video detected: playback controls are enabled.</span>
+    <span class="status-inline status-success" data-if="show_image_hint">Image detected: a single Gaussian output will be produced.</span>
+    <span class="status-inline status-warning" data-if="show_unsupported_hint">Unsupported type. Please use .mp4 or a supported image extension.</span>
+  </div>
+
+  <div class="section-card" data-if="show_video_config">
+    <span class="section-label text-accent">Video Settings</span>
+
+    <div class="setting-row">
+      <span class="prop-label">Frames to Convert</span>
+      <input type="range" class="setting-slider" data-value="max_video_frames_input" min="1" data-attr-max="video_total_frames_max" step="1" />
+      <span class="slider-value">{{max_video_frames_input}}</span>
+    </div>
+    <span class="sharp-help text-muted">{{frame_limit_text}}</span>
+
+    <div class="setting-row">
+      <span class="prop-label">Playback FPS</span>
+      <input type="range" class="setting-slider" data-value="playback_fps" min="1.0" max="120.0" step="1.0" />
+      <span class="slider-value">{{playback_fps_display}}</span>
+    </div>
+
+    <span class="sharp-meta text-default">{{source_fps_text}}</span>
+    <span class="sharp-meta text-default">{{video_total_frames_text}}</span>
+  </div>
+
+  <div class="section-card" data-if="show_processing">
+    <span class="section-label text-accent">Processing</span>
+    <span class="sharp-status text-default">{{processing_status_text}}</span>
+    <div class="sharp-progress-wrap">
+      <progress class="sharp-progress" max="1" data-attr-value="processing_progress_value"></progress>
+      <span class="progress__text">{{processing_progress_pct}}</span>
+    </div>
+  </div>
+
+  <div class="section-card" data-if="show_actions">
+    <span class="section-label text-accent">Actions</span>
+
+    <button class="btn btn--primary btn--full sharp-btn" data-if="show_load_cached" data-event-click="load_cached_output">{{load_cached_label}}</button>
+    <button class="btn btn--success btn--full sharp-btn" data-event-click="do_process_media">{{process_button_label}}</button>
+
+    <span class="status-inline status-error" data-if="show_error">{{error_text}}</span>
+  </div>
+
+  <div class="section-card" data-if="show_video_result">
+    <span class="section-label text-accent">Result Playback</span>
+    <span class="sharp-meta text-default">{{result_frames_text}}</span>
+
+    <button class="btn btn--primary btn--full sharp-btn" data-if="show_play_controls" data-event-click="toggle_playback">{{play_button_label}}</button>
+    <button class="btn btn--full sharp-btn sharp-btn--secondary" data-event-click="reset_frame">Reset Frame</button>
+
+    <div class="setting-row">
+      <span class="prop-label">{{current_frame_label}}</span>
+      <input type="range" class="setting-slider" data-value="current_frame_idx" min="0" data-attr-max="playback_frame_slider_max" step="1" />
+    </div>
+  </div>
+
+  <div class="section-card" data-if="show_image_result">
+    <span class="section-label text-accent">Result</span>
+    <span class="status-inline status-success">{{image_complete_message}}</span>
+  </div>
+
+</div>
+</div>
+</body>
+</rml>

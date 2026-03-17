@@ -1,21 +1,24 @@
 # SPDX-FileCopyrightText: 2026 LichtFeld Studio Authors
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Sharp 4D Video Panel."""
+
 import ssl
+
 ssl._create_default_https_context = ssl._create_unverified_context
 
+import logging
 import threading
 import time
-import logging
-from pathlib import Path
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, List
+from pathlib import Path
+from typing import List, Optional
 
 import lichtfeld as lf
-from lfs_plugins.types import Panel
 
 from .. import sharp_processor
+from .scrub_field import ScrubFieldController, ScrubFieldSpec
+
 
 class Stage(Enum):
     IDLE = "idle"
@@ -23,10 +26,12 @@ class Stage(Enum):
     PLAYING = "playing"
     ERROR = "error"
 
+
 class InputKind(Enum):
     NONE = "none"
     VIDEO = "video"
     IMAGE = "image"
+
 
 @dataclass
 class ProcessResult:
@@ -34,6 +39,7 @@ class ProcessResult:
     ply_files: List[str] = field(default_factory=list)
     fps: float = 30.0
     error: Optional[str] = None
+
 
 class ProcessingJob:
     def __init__(
@@ -47,8 +53,8 @@ class ProcessingJob:
         self.max_video_frames = max_video_frames
         self.progress = 0.0
         self.status = ""
-        self.result = None
-        self._thread = None
+        self.result: Optional[ProcessResult] = None
+        self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
 
     def start(self, callback):
@@ -59,28 +65,22 @@ class ProcessingJob:
         try:
             if self.input_kind == InputKind.VIDEO:
                 processor = sharp_processor.SharpProcessor()
-                
+
                 def prog_cb(i, total, msg):
                     with self._lock:
                         self.status = msg
                         if total > 0:
                             self.progress = (i / total) * 100
-                
-                # Output dir is adjacent to video
-                v_path = Path(self.input_path)
-                out_dir = v_path.parent / (v_path.stem + "_gaussians")
-                
+
+                video_path = Path(self.input_path)
+                out_dir = video_path.parent / f"{video_path.stem}_gaussians"
                 files, fps = processor.process_video(
                     self.input_path,
                     str(out_dir),
                     prog_cb,
                     max_frames=self.max_video_frames,
                 )
-                
-                # Unload model by deleting processor instance (assuming cleanup happens in __del__ or by GC)
-                # If explicit unload needed, add method to processor. Here GC handles it.
                 del processor
-                
             elif self.input_kind == InputKind.IMAGE:
                 processor = sharp_processor.SharpProcessor()
 
@@ -91,7 +91,7 @@ class ProcessingJob:
                             self.progress = (i / total) * 100
 
                 image_path = Path(self.input_path)
-                out_dir = image_path.parent / (image_path.stem + "_gaussians")
+                out_dir = image_path.parent / f"{image_path.stem}_gaussians"
                 files = processor.process_image(self.input_path, str(out_dir), prog_cb)
                 fps = 0.0
                 del processor
@@ -102,191 +102,476 @@ class ProcessingJob:
                 self.result = ProcessResult(True, files, fps)
                 self.progress = 100.0
                 self.status = "Complete"
-            
+
             callback(self.result)
-            
-        except Exception as e:
-            logging.error(f"Processing failed: {e}")
+        except Exception as exc:
+            logging.error("Processing failed: %s", exc)
             with self._lock:
-                self.result = ProcessResult(False, error=str(e))
-                self.status = f"Error: {e}"
+                self.result = ProcessResult(False, error=str(exc))
+                self.status = f"Error: {exc}"
             callback(self.result)
 
-class SharpVideoPanel(Panel):
-    idname = "sharp_4d.video_panel"
+
+class SharpVideoPanel(lf.ui.Panel):
+    id = "sharp_4d.video_panel"
     label = "Sharp 4D Video"
-    space = "MAIN_PANEL_TAB"
+    space = lf.ui.PanelSpace.MAIN_PANEL_TAB
     order = 10000
+    template = str(Path(__file__).resolve().with_name("sharp_video.rml"))
+    height_mode = lf.ui.PanelHeightMode.CONTENT
+    update_interval_ms = 33
+
     VIDEO_EXTENSIONS = {".mp4"}
     IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp", ".heic"}
-    SUPPORTED_MEDIA_LABEL = "Supported: .mp4, .jpg, .jpeg, .png, .bmp, .tif, .tiff, .webp, .heic"
-    ACTION_BUTTON_HEIGHT = 32
 
     def __init__(self):
         self.input_path = ""
         self.input_kind = InputKind.NONE
-        
-        self.job = None
-        self.ply_files = []
+
+        self.job: Optional[ProcessingJob] = None
+        self.ply_files: List[str] = []
         self.playback_fps = 30.0
         self.current_frame_idx = 0
         self.last_frame_time = 0.0
         self.is_playing = False
-        self._last_displayed_frame_idx = None
-        
-        self.frame_cache = {} 
-        self.cache_limit = 150 
-        
+        self._last_displayed_frame_idx: Optional[int] = None
+
+        self.frame_cache = {}
+        self.cache_limit = 150
+
         self.stage = Stage.IDLE
         self.error_message = ""
         self.source_fps = 30.0
         self.video_total_frames = 1
         self.image_complete_message = ""
         self.max_video_frames_input = 1
+        self.cached_output_count = 0
 
-    def draw(self, layout):
-        layout.heading("Sharp 4D Media")
-        layout.text_wrapped(
-            "Select one media file (.mp4 or image). The plugin auto-detects the type and runs the correct pipeline."
+        self._handle = None
+        self._doc = None
+        self._last_ui_signature = None
+        self._pending_result: Optional[ProcessResult] = None
+        self._pending_lock = threading.Lock()
+        self._scrub_fields = ScrubFieldController(
+            specs={
+                "max_video_frames_input": ScrubFieldSpec(
+                    min_value=1.0,
+                    max_value=1.0,
+                    step=1.0,
+                    fmt="%d",
+                    data_type=int,
+                ),
+                "playback_fps": ScrubFieldSpec(
+                    min_value=1.0,
+                    max_value=120.0,
+                    step=1.0,
+                    fmt="%.1f",
+                    data_type=float,
+                ),
+                "current_frame_idx": ScrubFieldSpec(
+                    min_value=0.0,
+                    max_value=0.0,
+                    step=1.0,
+                    fmt="%d",
+                    data_type=int,
+                ),
+            },
+            get_value=self._get_scrub_field_value,
+            set_value=self._set_scrub_field_value,
         )
-        layout.separator()
 
-        stage_label, stage_color = self._stage_style()
-        layout.text_colored(f"Stage: {stage_label}", stage_color)
-        layout.separator()
+    def draw(self, ui):
+        del ui
 
-        if self.stage == Stage.PROCESSING:
-            if self.job:
-                with self.job._lock:
-                    status = self.job.status or "Initializing..."
-                    progress = max(0.0, min(100.0, self.job.progress))
-                    layout.text_colored(f"Status: {status}", (0.35, 0.70, 1.0, 1.0))
-                    layout.progress_bar(progress / 100.0, f"{progress:.1f}%")
+    def on_mount(self, doc):
+        self._doc = doc
+        self._scrub_fields.mount(doc)
+
+    def on_bind_model(self, ctx):
+        model = ctx.create_data_model("sharp_video")
+        if model is None:
             return
 
-        if layout.collapsing_header("Configuration", default_open=True):
-            layout.label("Media File")
-            if layout.button_styled("Select Video File (.mp4)", "primary", (190, 28)):
-                selected = lf.ui.open_video_file_dialog()
-                if selected:
-                    self._set_input_path(selected)
-            layout.same_line()
-            if layout.button("Select Image File"):
-                selected = lf.ui.open_image_dialog(self._input_start_dir())
-                if selected:
-                    self._set_input_path(selected)
-            layout.same_line()
-            if layout.small_button("Clear"):
-                self._set_input_path("")
+        model.bind_func("is_stage_idle", lambda: self.stage == Stage.IDLE)
+        model.bind_func("is_stage_processing", lambda: self.stage == Stage.PROCESSING)
+        model.bind_func("is_stage_playing", lambda: self.stage == Stage.PLAYING)
+        model.bind_func("is_stage_error", lambda: self.stage == Stage.ERROR)
 
-            layout.text_disabled(self.SUPPORTED_MEDIA_LABEL)
+        model.bind_func("detected_type_text", self._detected_type_text)
+        model.bind_func("input_path_text", lambda: self.input_path or "No media file selected")
+        model.bind_func("show_video_config", lambda: self.input_kind == InputKind.VIDEO)
+        model.bind_func("show_image_hint", lambda: self.input_kind == InputKind.IMAGE)
+        model.bind_func("show_unsupported_hint", lambda: bool(self.input_path) and self.input_kind == InputKind.NONE)
 
-            detected_label = self.input_kind.value if self.input_kind != InputKind.NONE else "not detected"
-            layout.label(f"Detected Type: {detected_label}")
-            layout.text_selectable(self.input_path if self.input_path else "No media file selected")
+        model.bind(
+            "max_video_frames_input",
+            lambda: str(self._selected_video_frame_limit()),
+            self._set_max_video_frames_input,
+        )
+        model.bind_func("video_total_frames_max", lambda: str(max(1, self.video_total_frames)))
+        model.bind_func("frame_limit_text", self._frame_limit_text)
+        model.bind(
+            "playback_fps",
+            lambda: f"{self.playback_fps:.1f}",
+            self._set_playback_fps,
+        )
+        model.bind_func("playback_fps_display", lambda: f"{self.playback_fps:.1f}")
+        model.bind_func("source_fps_text", lambda: f"Detected Source FPS: {self.source_fps:.2f}")
+        model.bind_func("video_total_frames_text", lambda: f"Total Frames in Video: {self.video_total_frames}")
 
-            if self.input_kind == InputKind.VIDEO:
-                layout.text_colored("Video detected: playback controls are enabled.", (0.20, 0.80, 0.45, 1.0))
-                layout.label("Number of Frames to Convert:")
-                layout.same_line()
-                _, self.max_video_frames_input = layout.slider_int(
-                    "##max_frames_to_convert",
-                    self.max_video_frames_input,
-                    1,
-                    self.video_total_frames,
-                )
-                self.max_video_frames_input = max(1, min(self.max_video_frames_input, self.video_total_frames))
+        model.bind_func("show_processing", lambda: self.stage == Stage.PROCESSING)
+        model.bind_func("processing_status_text", self._job_status_text)
+        model.bind_func("processing_progress_value", self._job_progress_value)
+        model.bind_func("processing_progress_pct", self._job_progress_pct)
 
-                selected_limit = self._selected_video_frame_limit()
-                layout.label(f"Frame Limit: {selected_limit}/{self.video_total_frames} frames will be converted.")
-                _, self.playback_fps = layout.slider_float("Playback FPS", self.playback_fps, 1.0, 120.0)
-                layout.label(f"Detected Source FPS: {self.source_fps:.2f}")
-                layout.label(f"Total Frames in Video: {self.video_total_frames}")
-            elif self.input_kind == InputKind.IMAGE:
-                layout.text_colored("Image detected: a single Gaussian output will be produced.", (0.20, 0.80, 0.45, 1.0))
-            elif self.input_path:
-                layout.text_colored(
-                    "Unsupported type. Please use .mp4 or a supported image extension.",
-                    (1.0, 0.45, 0.25, 1.0),
-                )
+        model.bind_func("show_actions", lambda: self.stage in {Stage.IDLE, Stage.ERROR})
+        model.bind_func("show_load_cached", lambda: self.input_kind == InputKind.VIDEO and self.cached_output_count > 0)
+        model.bind_func("load_cached_label", self._load_cached_label)
+        model.bind_func("process_button_label", self._process_button_label)
+        model.bind_func("show_error", lambda: self.stage == Stage.ERROR and bool(self.error_message))
+        model.bind_func("error_text", lambda: self.error_message)
 
-        if self.stage in {Stage.IDLE, Stage.ERROR}:
-            if self.input_kind == InputKind.VIDEO:
-                selected_limit = self._selected_video_frame_limit()
-                cached_count = self._existing_output_count()
-                if cached_count > 0:
-                    load_count = min(selected_limit, cached_count)
-                    if layout.button_styled(
-                        f"Load {load_count} Frames From Disk",
-                        "primary",
-                        (-1, self.ACTION_BUTTON_HEIGHT),
-                    ):
-                        loaded = self._load_existing_output(frame_limit=selected_limit)
-                        if not loaded:
-                            self.error_message = "Could not load cached frames from disk."
-                            self.stage = Stage.ERROR
+        model.bind_func("show_video_result", lambda: bool(self.ply_files) and self.input_kind == InputKind.VIDEO)
+        model.bind_func("result_frames_text", lambda: f"Frames: {len(self.ply_files)}")
+        model.bind_func("play_button_label", lambda: "Pause" if self.is_playing else "Play")
+        model.bind_func("show_play_controls", lambda: len(self.ply_files) > 1)
+        model.bind(
+            "current_frame_idx",
+            lambda: str(self.current_frame_idx if self.ply_files else 0),
+            self._set_current_frame_idx,
+        )
+        model.bind_func("playback_frame_slider_max", lambda: str(max(0, len(self.ply_files) - 1)))
+        model.bind_func("current_frame_label", self._current_frame_label)
 
-                if layout.button_styled(
-                    f"Process {selected_limit} Frames",
-                    "primary",
-                    (-1, self.ACTION_BUTTON_HEIGHT),
-                ):
-                    self._start_processing()
-            elif self.input_kind == InputKind.IMAGE:
-                if layout.button_styled("Process Image", "primary", (-1, self.ACTION_BUTTON_HEIGHT)):
-                    self._start_processing()
-            else:
-                if layout.button_styled("Process Media", "primary", (-1, self.ACTION_BUTTON_HEIGHT)):
-                    self._start_processing()
-            
-            if self.stage == Stage.ERROR and self.error_message:
-                layout.text_colored(f"Error: {self.error_message}", (1.0, 0.25, 0.25, 1.0))
+        model.bind_func("show_image_result", lambda: bool(self.ply_files) and self.input_kind == InputKind.IMAGE)
+        model.bind_func("image_complete_message", lambda: self.image_complete_message)
 
-        if self.ply_files:
-            layout.separator()
-            if self.input_kind == InputKind.VIDEO:
-                layout.heading("Result Playback")
-                layout.label(f"Frames: {len(self.ply_files)}")
-                if layout.button("Pause" if self.is_playing else "Play"):
-                    self.is_playing = not self.is_playing
-                    self.stage = Stage.PLAYING if self.is_playing else Stage.IDLE
-                    self.last_frame_time = time.time()
-                if layout.button("Reset Frame"):
-                    self.current_frame_idx = 0
-                    self._update_scene_frame(0)
-                    self._last_displayed_frame_idx = 0
+        model.bind_event("select_video", self._on_select_video)
+        model.bind_event("select_image", self._on_select_image)
+        model.bind_event("clear_input", self._on_clear_input)
+        model.bind_event("load_cached_output", self._on_load_cached_output)
+        model.bind_event("do_process_media", self._on_process_media)
+        model.bind_event("toggle_playback", self._on_toggle_playback)
+        model.bind_event("reset_frame", self._on_reset_frame)
 
-                _, self.current_frame_idx = layout.slider_int(
-                    f"Frame {self.current_frame_idx+1}/{len(self.ply_files)}", 
-                    self.current_frame_idx, 0, len(self.ply_files)-1
-                )
+        self._handle = model.get_handle()
 
-                if not self.is_playing and self.current_frame_idx != self._last_displayed_frame_idx:
-                    self._update_scene_frame(self.current_frame_idx)
-                    self._last_displayed_frame_idx = self.current_frame_idx
-            else:
-                layout.heading("Result")
-                if self.image_complete_message:
-                    layout.text_colored(self.image_complete_message, (0.20, 0.80, 0.45, 1.0))
+    def on_update(self, doc):
+        del doc
+        dirty = self._consume_pending_result()
+        if self._tick_playback():
+            dirty = True
+        if self._sync_scrub_specs():
+            dirty = True
+        if self._scrub_fields.sync_all():
+            dirty = True
 
-        if self.is_playing and self.ply_files:
-            now = time.time()
-            frame_duration = 1.0 / max(1.0, self.playback_fps)
-            if now - self.last_frame_time >= frame_duration:
-                self.current_frame_idx = (self.current_frame_idx + 1) % len(self.ply_files)
-                self._update_scene_frame(self.current_frame_idx)
-                self._last_displayed_frame_idx = self.current_frame_idx
-                self.last_frame_time = now
+        signature = self._ui_signature()
+        if signature != self._last_ui_signature:
+            self._last_ui_signature = signature
+            dirty = True
+
+        if dirty:
+            self._dirty()
+        return dirty
+
+    def on_unmount(self, doc):
+        if doc is not None:
+            doc.remove_data_model("sharp_video")
+        self._scrub_fields.unmount()
+        self._handle = None
+        self._doc = None
+        self._last_ui_signature = None
+
+    def _dirty(self, *fields):
+        if self._handle is None:
+            return
+        if not fields:
+            self._handle.dirty_all()
+            return
+        for field in fields:
+            self._handle.dirty(field)
+
+    def _detected_type_text(self) -> str:
+        if self.input_kind == InputKind.NONE:
+            return "not detected"
+        return self.input_kind.value
+
+    def _get_scrub_field_value(self, prop: str) -> float:
+        if prop == "max_video_frames_input":
+            return float(self._selected_video_frame_limit())
+        if prop == "playback_fps":
+            return float(self.playback_fps)
+        if prop == "current_frame_idx":
+            return float(self.current_frame_idx)
+        raise KeyError(prop)
+
+    def _set_scrub_field_value(self, prop: str, value: float) -> None:
+        if prop == "max_video_frames_input":
+            self._set_max_video_frames_input(value)
+            return
+        if prop == "playback_fps":
+            self._set_playback_fps(value)
+            return
+        if prop == "current_frame_idx":
+            self._set_current_frame_idx(value)
+            return
+        raise KeyError(prop)
+
+    def _sync_scrub_specs(self) -> bool:
+        changed = False
+
+        max_frames_spec = self._scrub_fields._specs["max_video_frames_input"]
+        next_max_frames = float(max(1, self.video_total_frames))
+        if abs(max_frames_spec.max_value - next_max_frames) > 1.0e-9:
+            self._scrub_fields._specs["max_video_frames_input"] = ScrubFieldSpec(
+                min_value=max_frames_spec.min_value,
+                max_value=next_max_frames,
+                step=max_frames_spec.step,
+                fmt=max_frames_spec.fmt,
+                data_type=max_frames_spec.data_type,
+                pixels_per_step=max_frames_spec.pixels_per_step,
+            )
+            changed = True
+
+        frame_idx_spec = self._scrub_fields._specs["current_frame_idx"]
+        next_frame_max = float(max(0, len(self.ply_files) - 1))
+        if abs(frame_idx_spec.max_value - next_frame_max) > 1.0e-9:
+            self._scrub_fields._specs["current_frame_idx"] = ScrubFieldSpec(
+                min_value=frame_idx_spec.min_value,
+                max_value=next_frame_max,
+                step=frame_idx_spec.step,
+                fmt=frame_idx_spec.fmt,
+                data_type=frame_idx_spec.data_type,
+                pixels_per_step=frame_idx_spec.pixels_per_step,
+            )
+            changed = True
+
+        return changed
+
+    def _frame_limit_text(self) -> str:
+        return f"Frame Limit: {self._selected_video_frame_limit()}/{self.video_total_frames} frames will be converted."
+
+    def _job_status_text(self) -> str:
+        if self.job is None:
+            return "Initializing..."
+        with self.job._lock:
+            return self.job.status or "Initializing..."
+
+    def _job_progress_value(self) -> str:
+        if self.job is None:
+            return "0"
+        with self.job._lock:
+            progress = max(0.0, min(100.0, self.job.progress))
+        return f"{progress / 100.0:.4f}"
+
+    def _job_progress_pct(self) -> str:
+        if self.job is None:
+            return "0.0%"
+        with self.job._lock:
+            progress = max(0.0, min(100.0, self.job.progress))
+        return f"{progress:.1f}%"
+
+    def _load_cached_label(self) -> str:
+        load_count = min(self._selected_video_frame_limit(), self.cached_output_count)
+        return f"Load {load_count} Frames From Disk"
+
+    def _process_button_label(self) -> str:
+        if self.input_kind == InputKind.VIDEO:
+            return f"Process {self._selected_video_frame_limit()} Frames"
+        if self.input_kind == InputKind.IMAGE:
+            return "Process Image"
+        return "Process Media"
+
+    def _current_frame_label(self) -> str:
+        if not self.ply_files:
+            return "Frame"
+        return f"Frame {self.current_frame_idx + 1}/{len(self.ply_files)}"
+
+    def _ui_signature(self):
+        return (
+            self.stage.value,
+            self.input_path,
+            self.input_kind.value,
+            self.error_message,
+            self.image_complete_message,
+            self.max_video_frames_input,
+            self.video_total_frames,
+            round(self.playback_fps, 3),
+            round(self.source_fps, 3),
+            len(self.ply_files),
+            self.current_frame_idx,
+            self.is_playing,
+            self.cached_output_count,
+            self._job_signature(),
+        )
+
+    def _job_signature(self):
+        if self.job is None:
+            return None
+        with self.job._lock:
+            return (
+                round(self.job.progress, 2),
+                self.job.status,
+                self.job.result.success if self.job.result is not None else None,
+            )
+
+    def _consume_pending_result(self) -> bool:
+        with self._pending_lock:
+            result = self._pending_result
+            self._pending_result = None
+        if result is None:
+            return False
+        self._apply_result(result)
+        return True
+
+    def _apply_result(self, result: ProcessResult):
+        self.job = None
+        if result.success:
+            self.ply_files = sorted(result.ply_files)
+            self.stage = Stage.IDLE
+            self.current_frame_idx = 0
+            self._last_displayed_frame_idx = 0
+            self.image_complete_message = ""
+
+            if self.input_kind == InputKind.VIDEO and result.fps > 0:
+                self.source_fps = result.fps
+                self.playback_fps = result.fps
+
+            self.is_playing = self.input_kind == InputKind.VIDEO and len(self.ply_files) > 1
+            self.stage = Stage.PLAYING if self.is_playing else Stage.IDLE
+            if self.input_kind == InputKind.IMAGE:
+                self.image_complete_message = "Processing completed."
+            self.last_frame_time = time.time()
+            self.frame_cache.clear()
+            self._refresh_cached_output_state()
+            if self.ply_files:
+                self._update_scene_frame(0)
+
+            threading.Thread(target=self._preload_frames, daemon=True).start()
+        else:
+            self.error_message = result.error or "Processing failed"
+            self.stage = Stage.ERROR
+            self._refresh_cached_output_state()
+
+    def _tick_playback(self) -> bool:
+        if not self.is_playing or not self.ply_files:
+            return False
+
+        frame_duration = 1.0 / max(1.0, self.playback_fps)
+        now = time.time()
+        if now - self.last_frame_time < frame_duration:
+            return False
+
+        elapsed = max(0.0, now - self.last_frame_time)
+        steps = max(1, int(elapsed / frame_duration))
+        self.current_frame_idx = (self.current_frame_idx + steps) % len(self.ply_files)
+        self._update_scene_frame(self.current_frame_idx)
+        self._last_displayed_frame_idx = self.current_frame_idx
+        self.last_frame_time = now
+        return True
+
+    def _on_select_video(self, handle, event, args):
+        del handle, event, args
+        selected = lf.ui.open_video_file_dialog()
+        if selected:
+            self._set_input_path(selected)
+            self._dirty()
+
+    def _on_select_image(self, handle, event, args):
+        del handle, event, args
+        selected = lf.ui.open_image_dialog(self._input_start_dir())
+        if selected:
+            self._set_input_path(selected)
+            self._dirty()
+
+    def _on_clear_input(self, handle, event, args):
+        del handle, event, args
+        self._set_input_path("")
+        self._dirty()
+
+    def _on_load_cached_output(self, handle, event, args):
+        del handle, event, args
+        loaded = self._load_existing_output(frame_limit=self._selected_video_frame_limit())
+        if not loaded:
+            self.error_message = "Could not load cached frames from disk."
+            self.stage = Stage.ERROR
+        self._dirty()
+
+    def _on_process_media(self, handle, event, args):
+        del handle, event, args
+        self._start_processing()
+        self._dirty()
+
+    def _on_toggle_playback(self, handle, event, args):
+        del handle, event, args
+        if len(self.ply_files) <= 1 or self.input_kind != InputKind.VIDEO:
+            return
+        self.is_playing = not self.is_playing
+        self.stage = Stage.PLAYING if self.is_playing else Stage.IDLE
+        self.last_frame_time = time.time()
+        self._dirty()
+
+    def _on_reset_frame(self, handle, event, args):
+        del handle, event, args
+        if not self.ply_files:
+            return
+        self.current_frame_idx = 0
+        self._update_scene_frame(0)
+        self._last_displayed_frame_idx = 0
+        self.last_frame_time = time.time()
+        self._dirty()
+
+    def _set_max_video_frames_input(self, value):
+        try:
+            frame_limit = int(float(value))
+        except (TypeError, ValueError):
+            return
+        frame_limit = max(1, min(frame_limit, max(1, self.video_total_frames)))
+        if frame_limit == self.max_video_frames_input:
+            return
+        self.max_video_frames_input = frame_limit
+        self._dirty("max_video_frames_input", "frame_limit_text")
+
+    def _set_playback_fps(self, value):
+        try:
+            fps = float(value)
+        except (TypeError, ValueError):
+            return
+        fps = max(1.0, min(fps, 120.0))
+        if abs(fps - self.playback_fps) < 1e-6:
+            return
+        self.playback_fps = fps
+        self.last_frame_time = time.time()
+        self._dirty("playback_fps", "playback_fps_display")
+
+    def _set_current_frame_idx(self, value):
+        if not self.ply_files:
+            return
+        try:
+            idx = int(float(value))
+        except (TypeError, ValueError):
+            return
+        idx = max(0, min(idx, len(self.ply_files) - 1))
+        if idx == self.current_frame_idx and idx == self._last_displayed_frame_idx:
+            return
+        self.current_frame_idx = idx
+        self._update_scene_frame(idx)
+        self._last_displayed_frame_idx = idx
+        self.last_frame_time = time.time()
+        self._dirty("current_frame_idx", "current_frame_label")
 
     def _start_processing(self):
-        self.error_message = ""  # Clear previous errors
+        self.error_message = ""
         self.image_complete_message = ""
-        
+        with self._pending_lock:
+            self._pending_result = None
+
         if not self.input_path.strip():
-            self.error_message = "Please select a video or image file"
+            self.error_message = "Please select a video or image file."
             self.stage = Stage.ERROR
             return
-        
+
         path = Path(self.input_path)
         if not path.exists() or not path.is_file():
             self.error_message = f"File does not exist: {self.input_path}"
@@ -307,33 +592,11 @@ class SharpVideoPanel(Panel):
             max_video_frames=self._selected_video_frame_limit(),
         )
         self.stage = Stage.PROCESSING
-        self.job.start(self._on_complete)
+        self.job.start(self._on_job_complete)
 
-    def _on_complete(self, result: ProcessResult):
-        if result.success:
-            self.ply_files = sorted(result.ply_files)
-            self.stage = Stage.IDLE 
-            self.current_frame_idx = 0
-            self._last_displayed_frame_idx = 0
-            self.image_complete_message = ""
-
-            if self.input_kind == InputKind.VIDEO and result.fps > 0:
-                self.source_fps = result.fps
-                self.playback_fps = result.fps
-
-            self.is_playing = self.input_kind == InputKind.VIDEO and len(self.ply_files) > 1
-            self.stage = Stage.PLAYING if self.is_playing else Stage.IDLE
-            if self.input_kind == InputKind.IMAGE:
-                self.image_complete_message = "Processing completed."
-            self.last_frame_time = time.time()
-            self.frame_cache.clear()
-            if self.ply_files:
-                self._update_scene_frame(0)
-            
-            threading.Thread(target=self._preload_frames, daemon=True).start()
-        else:
-            self.error_message = result.error or "Processing failed"
-            self.stage = Stage.ERROR
+    def _on_job_complete(self, result: ProcessResult):
+        with self._pending_lock:
+            self._pending_result = result
 
     def _input_start_dir(self) -> str:
         if self.input_path:
@@ -358,6 +621,7 @@ class SharpVideoPanel(Panel):
             self.error_message = ""
             self.video_total_frames = 1
             self.max_video_frames_input = 1
+            self.cached_output_count = 0
             if self.stage == Stage.ERROR:
                 self.stage = Stage.IDLE
             self._reset_result_state()
@@ -371,6 +635,7 @@ class SharpVideoPanel(Panel):
         if detected_kind is None:
             self.input_kind = InputKind.NONE
             self.error_message = "Unsupported file type. Use .mp4 or a supported image file."
+            self.cached_output_count = 0
             return
 
         self.input_kind = detected_kind
@@ -380,6 +645,7 @@ class SharpVideoPanel(Panel):
         else:
             self.video_total_frames = 1
             self.max_video_frames_input = 1
+        self._refresh_cached_output_state()
         if self._try_autoload_existing_output():
             return
         if self.stage == Stage.ERROR:
@@ -416,10 +682,13 @@ class SharpVideoPanel(Panel):
             self.video_total_frames = total_frames
             if self.max_video_frames_input < 1 or self.max_video_frames_input > total_frames:
                 self.max_video_frames_input = total_frames
-        except Exception as e:
+        except Exception as exc:
             self.video_total_frames = 1
             self.max_video_frames_input = 1
-            lf.log.warning(f"Could not read video metadata for slider bounds: {e}")
+            lf.log.warning(f"Could not read video metadata for slider bounds: {exc}")
+
+    def _refresh_cached_output_state(self):
+        self.cached_output_count = self._existing_output_count()
 
     def _try_autoload_existing_output(self) -> bool:
         frame_limit = self._selected_video_frame_limit() if self.input_kind == InputKind.VIDEO else None
@@ -457,6 +726,7 @@ class SharpVideoPanel(Panel):
             self.stage = Stage.IDLE
             self.image_complete_message = "Processing completed."
 
+        self._refresh_cached_output_state()
         self._update_scene_frame(0)
         threading.Thread(target=self._preload_frames, daemon=True).start()
         return True
@@ -472,8 +742,8 @@ class SharpVideoPanel(Panel):
         if self.input_kind == InputKind.VIDEO:
             frame_files = sorted(output_dir.glob("frame_*.ply"))
             if frame_files:
-                return [str(p) for p in frame_files]
-            return [str(p) for p in sorted(output_dir.glob("*.ply"))]
+                return [str(path) for path in frame_files]
+            return [str(path) for path in sorted(output_dir.glob("*.ply"))]
 
         if self.input_kind == InputKind.IMAGE:
             input_file = Path(self.input_path)
@@ -491,26 +761,18 @@ class SharpVideoPanel(Panel):
         input_file = Path(self.input_path)
         return input_file.parent / f"{input_file.stem}_gaussians"
 
-    def _stage_style(self):
-        if self.stage == Stage.PROCESSING:
-            return "Processing", (0.30, 0.70, 1.0, 1.0)
-        if self.stage == Stage.PLAYING:
-            return "Playing", (0.20, 0.80, 0.45, 1.0)
-        if self.stage == Stage.ERROR:
-            return "Error", (1.0, 0.25, 0.25, 1.0)
-        return "Idle", (0.70, 0.70, 0.75, 1.0)
-
     def _preload_frames(self):
         count = 0
-        for p in self.ply_files:
-            if count >= self.cache_limit: break
-            if p not in self.frame_cache:
-                try:
-                    self.frame_cache[p] = sharp_processor.load_gaussian_ply(p)
-                    count += 1
-                except:
-                    pass
-
+        for ply_path in self.ply_files:
+            if count >= self.cache_limit:
+                break
+            if ply_path in self.frame_cache:
+                continue
+            try:
+                self.frame_cache[ply_path] = sharp_processor.load_gaussian_ply(ply_path)
+                count += 1
+            except Exception:
+                pass
 
     def _update_scene_frame(self, idx, node_name=None):
         if not self.ply_files:
@@ -524,20 +786,25 @@ class SharpVideoPanel(Panel):
             splat = result.splat_data
             if splat is None:
                 raise RuntimeError("No splat data returned")
-        except Exception as e:
-            lf.log.error(f"Failed to load splat frame {path}: {e}")
+        except Exception as exc:
+            lf.log.error(f"Failed to load splat frame {path}: {exc}")
+            self.error_message = f"Failed to load frame: {path.name}"
+            self.stage = Stage.ERROR
+            self.is_playing = False
             return
 
         scene = lf.get_scene()
         if scene is None:
             lf.log.error("No active scene available.")
+            self.error_message = "No active scene available."
             self.stage = Stage.ERROR
+            self.is_playing = False
             return
 
         new_node_name = f"{node_name}__next"
 
         if self.input_kind == InputKind.VIDEO:
-            lf.log.info(f"Adding frame {idx+1}/{len(self.ply_files)}: {path}")
+            lf.log.info(f"Adding frame {idx + 1}/{len(self.ply_files)}: {path}")
         else:
             lf.log.info(f"Displaying processed output: {path}")
 

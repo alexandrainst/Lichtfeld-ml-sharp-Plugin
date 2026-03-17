@@ -1,13 +1,12 @@
 [project]
 name = "sharp_4d"
-version = "0.2.2"
+version = "0.3.0"
 description = "4D Gaussian Splatting from Video using SHARP"
-
 requires-python = ">=3.12"
 dependencies = [
     "numpy",
-    "torch>=2.2",
-    "torchvision>=0.23.0",
+    "torch==2.7.1+cu128",
+    "torchvision==0.22.1+cu128",
     "timm",
     "gsplat",
     "imageio",
@@ -25,12 +24,14 @@ name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
-[tool.lichtfeld]
-auto_start = true
-hot_reload = true
-min_lichtfeld_version = "0.0.5"
-
 [tool.uv.sources]
 sharp = { path = "ml-sharp" }
 torch = [{ index = "pytorch-cu128" }]
 torchvision = [{ index = "pytorch-cu128" }]
+
+[tool.lichtfeld]
+hot_reload = true
+entry_point = "plugin"
+plugin_api = ">=1,<2"
+lichtfeld_version = ">=0.4.2"
+required_features = []
