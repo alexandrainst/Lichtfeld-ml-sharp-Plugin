@@ -37,17 +37,21 @@
   <div class="section-card" data-if="show_video_config">
     <span class="section-label text-accent">Video Settings</span>
 
-    <div class="setting-row">
-      <span class="prop-label">Frames to Convert</span>
-      <input type="range" class="setting-slider" data-value="max_video_frames_input" min="1" data-attr-max="video_total_frames_max" step="1" />
-      <span class="slider-value">{{max_video_frames_input}}</span>
+    <div class="setting-row setting-row--aligned">
+      <span class="setting-row__label-col">Frames to Convert</span>
+      <div class="setting-row__control-col setting-row__control-col--slider">
+        <input type="range" class="setting-slider" data-value="max_video_frames_input" min="1" data-attr-max="video_total_frames_max" step="1" />
+        <span class="slider-value">{{max_video_frames_input}}</span>
+      </div>
     </div>
     <span class="sharp-help text-muted">{{frame_limit_text}}</span>
 
-    <div class="setting-row">
-      <span class="prop-label">Playback FPS</span>
-      <input type="range" class="setting-slider" data-value="playback_fps" min="1.0" max="120.0" step="1.0" />
-      <span class="slider-value">{{playback_fps_display}}</span>
+    <div class="setting-row setting-row--aligned">
+      <span class="setting-row__label-col">Playback FPS</span>
+      <div class="setting-row__control-col setting-row__control-col--slider">
+        <input type="range" class="setting-slider" data-value="playback_fps" min="1.0" max="120.0" step="1.0" />
+        <span class="slider-value">{{playback_fps}}</span>
+      </div>
     </div>
 
     <span class="sharp-meta text-default">{{source_fps_text}}</span>
@@ -79,9 +83,12 @@
     <button class="btn btn--primary btn--full sharp-btn" data-if="show_play_controls" data-event-click="toggle_playback">{{play_button_label}}</button>
     <button class="btn btn--full sharp-btn sharp-btn--secondary" data-event-click="reset_frame">Reset Frame</button>
 
-    <div class="setting-row">
-      <span class="prop-label">{{current_frame_label}}</span>
-      <input type="range" class="setting-slider" data-value="current_frame_idx" min="0" data-attr-max="playback_frame_slider_max" step="1" />
+    <div class="setting-row setting-row--aligned">
+      <span class="setting-row__label-col">{{current_frame_label}}</span>
+      <div class="setting-row__control-col setting-row__control-col--slider">
+        <input type="range" class="setting-slider" data-value="current_frame_idx" min="0" data-attr-max="playback_frame_slider_max" step="1" />
+        <span class="slider-value">{{current_frame_idx}}</span>
+      </div>
     </div>
   </div>
 

@@ -17,7 +17,35 @@ from typing import List, Optional
 import lichtfeld as lf
 
 from .. import sharp_processor
-from .scrub_field import ScrubFieldController, ScrubFieldSpec
+try:
+    from lfs_plugins import ScrubFieldController, ScrubFieldSpec
+except ImportError:
+    from lfs_plugins.scrub_fields import ScrubFieldController, ScrubFieldSpec
+
+
+SCRUB_FIELD_SPECS = {
+    "max_video_frames_input": ScrubFieldSpec(
+        min_value=1.0,
+        max_value=1.0,
+        step=1.0,
+        fmt="%d",
+        data_type=int,
+    ),
+    "playback_fps": ScrubFieldSpec(
+        min_value=1.0,
+        max_value=120.0,
+        step=1.0,
+        fmt="%.1f",
+        data_type=float,
+    ),
+    "current_frame_idx": ScrubFieldSpec(
+        min_value=0.0,
+        max_value=0.0,
+        step=1.0,
+        fmt="%d",
+        data_type=int,
+    ),
+}
 
 
 class Stage(Enum):
@@ -153,29 +181,7 @@ class SharpVideoPanel(lf.ui.Panel):
         self._pending_result: Optional[ProcessResult] = None
         self._pending_lock = threading.Lock()
         self._scrub_fields = ScrubFieldController(
-            specs={
-                "max_video_frames_input": ScrubFieldSpec(
-                    min_value=1.0,
-                    max_value=1.0,
-                    step=1.0,
-                    fmt="%d",
-                    data_type=int,
-                ),
-                "playback_fps": ScrubFieldSpec(
-                    min_value=1.0,
-                    max_value=120.0,
-                    step=1.0,
-                    fmt="%.1f",
-                    data_type=float,
-                ),
-                "current_frame_idx": ScrubFieldSpec(
-                    min_value=0.0,
-                    max_value=0.0,
-                    step=1.0,
-                    fmt="%d",
-                    data_type=int,
-                ),
-            },
+            specs=SCRUB_FIELD_SPECS,
             get_value=self._get_scrub_field_value,
             set_value=self._set_scrub_field_value,
         )
@@ -215,7 +221,6 @@ class SharpVideoPanel(lf.ui.Panel):
             lambda: f"{self.playback_fps:.1f}",
             self._set_playback_fps,
         )
-        model.bind_func("playback_fps_display", lambda: f"{self.playback_fps:.1f}")
         model.bind_func("source_fps_text", lambda: f"Detected Source FPS: {self.source_fps:.2f}")
         model.bind_func("video_total_frames_text", lambda: f"Total Frames in Video: {self.video_total_frames}")
 
@@ -321,33 +326,37 @@ class SharpVideoPanel(lf.ui.Panel):
     def _sync_scrub_specs(self) -> bool:
         changed = False
 
-        max_frames_spec = self._scrub_fields._specs["max_video_frames_input"]
-        next_max_frames = float(max(1, self.video_total_frames))
-        if abs(max_frames_spec.max_value - next_max_frames) > 1.0e-9:
-            self._scrub_fields._specs["max_video_frames_input"] = ScrubFieldSpec(
-                min_value=max_frames_spec.min_value,
-                max_value=next_max_frames,
-                step=max_frames_spec.step,
-                fmt=max_frames_spec.fmt,
-                data_type=max_frames_spec.data_type,
-                pixels_per_step=max_frames_spec.pixels_per_step,
-            )
-            changed = True
-
-        frame_idx_spec = self._scrub_fields._specs["current_frame_idx"]
-        next_frame_max = float(max(0, len(self.ply_files) - 1))
-        if abs(frame_idx_spec.max_value - next_frame_max) > 1.0e-9:
-            self._scrub_fields._specs["current_frame_idx"] = ScrubFieldSpec(
-                min_value=frame_idx_spec.min_value,
-                max_value=next_frame_max,
-                step=frame_idx_spec.step,
-                fmt=frame_idx_spec.fmt,
-                data_type=frame_idx_spec.data_type,
-                pixels_per_step=frame_idx_spec.pixels_per_step,
-            )
-            changed = True
+        changed |= self._update_scrub_spec(
+            "max_video_frames_input",
+            max_value=float(max(1, self.video_total_frames)),
+        )
+        changed |= self._update_scrub_spec(
+            "current_frame_idx",
+            max_value=float(max(0, len(self.ply_files) - 1)),
+        )
 
         return changed
+
+    def _update_scrub_spec(self, prop: str, *, max_value: float) -> bool:
+        current_spec = self._scrub_fields._specs[prop]
+        if abs(current_spec.max_value - max_value) <= 1.0e-9:
+            return False
+
+        next_spec = ScrubFieldSpec(
+            min_value=current_spec.min_value,
+            max_value=max_value,
+            step=current_spec.step,
+            fmt=current_spec.fmt,
+            data_type=current_spec.data_type,
+            pixels_per_step=current_spec.pixels_per_step,
+        )
+        self._scrub_fields._specs[prop] = next_spec
+
+        state = self._scrub_fields._fields.get(prop)
+        if state is not None:
+            state.spec = next_spec
+
+        return True
 
     def _frame_limit_text(self) -> str:
         return f"Frame Limit: {self._selected_video_frame_limit()}/{self.video_total_frames} frames will be converted."
@@ -543,7 +552,7 @@ class SharpVideoPanel(lf.ui.Panel):
             return
         self.playback_fps = fps
         self.last_frame_time = time.time()
-        self._dirty("playback_fps", "playback_fps_display")
+        self._dirty("playback_fps")
 
     def _set_current_frame_idx(self, value):
         if not self.ply_files:

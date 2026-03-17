@@ -111,12 +111,6 @@ body {
     color: #ff8e8e;
 }
 
-.prop-label {
-    width: 130dp;
-    min-width: 130dp;
-    max-width: 130dp;
-}
-
 .setting-row {
     display: flex;
     align-items: center;
@@ -125,21 +119,57 @@ body {
     line-height: 1.4;
 }
 
+.setting-row--aligned {
+    min-width: 0;
+}
+
+.setting-row__label-col {
+    width: 130dp;
+    min-width: 130dp;
+    max-width: 130dp;
+    margin-right: 6dp;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex-shrink: 0;
+}
+
+.setting-row__control-col {
+    display: flex;
+    align-items: center;
+    flex: 1;
+    min-width: 0;
+}
+
 .setting-slider {
     margin-top: 0;
 }
 
+.setting-row__control-col--slider > .setting-slider {
+    flex: 1;
+    min-width: 0;
+}
+
 .slider-value {
-    min-width: 32dp;
+    width: 48dp;
+    min-width: 48dp;
+    margin-left: 8dp;
+    text-align: right;
+    flex-shrink: 0;
+}
+
+.setting-row__control-col--slider > .scrub-field {
+    flex: 1;
+    min-width: 0;
 }
 
 .scrub-field {
     position: relative;
-    flex: 1;
     min-width: 0;
     height: 24dp;
     border-radius: 6dp;
     background: rgba(255, 255, 255, 0.05);
+    cursor: ew-resize;
     overflow: hidden;
 }
 
@@ -188,6 +218,7 @@ body {
 
 .scrub-field.is-editing {
     background: rgba(84, 170, 255, 0.10);
+    cursor: text;
 }
 
 .scrub-field.is-editing .scrub-field-display {
