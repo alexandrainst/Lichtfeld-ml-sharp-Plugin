@@ -1,6 +1,6 @@
 [project]
 name = "sharp_4d"
-version = "0.3.0"
+version = "0.3.1"
 description = "4D Gaussian Splatting from Video using SHARP"
 requires-python = ">=3.12"
 dependencies = [
