@@ -17,6 +17,7 @@ from typing import List, Optional
 import lichtfeld as lf
 
 from .. import sharp_processor
+
 try:
     from lfs_plugins import ScrubFieldController, ScrubFieldSpec
 except ImportError:
@@ -150,10 +151,20 @@ class SharpVideoPanel(lf.ui.Panel):
     update_interval_ms = 33
 
     VIDEO_EXTENSIONS = {".mp4"}
-    IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp", ".heic"}
+    IMAGE_EXTENSIONS = {
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".bmp",
+        ".tif",
+        ".tiff",
+        ".webp",
+        ".heic",
+    }
 
     def __init__(self):
         self.input_path = ""
+        self.input_path_draft = ""
         self.input_kind = InputKind.NONE
 
         self.job: Optional[ProcessingJob] = None
@@ -204,25 +215,42 @@ class SharpVideoPanel(lf.ui.Panel):
         model.bind_func("is_stage_error", lambda: self.stage == Stage.ERROR)
 
         model.bind_func("detected_type_text", self._detected_type_text)
-        model.bind_func("input_path_text", lambda: self.input_path or "No media file selected")
+        model.bind_func(
+            "input_path_text", lambda: self.input_path or "No media file selected"
+        )
+        model.bind(
+            "input_path_draft",
+            lambda: self.input_path_draft,
+            self._set_input_path_draft,
+        )
         model.bind_func("show_video_config", lambda: self.input_kind == InputKind.VIDEO)
         model.bind_func("show_image_hint", lambda: self.input_kind == InputKind.IMAGE)
-        model.bind_func("show_unsupported_hint", lambda: bool(self.input_path) and self.input_kind == InputKind.NONE)
+        model.bind_func(
+            "show_unsupported_hint",
+            lambda: bool(self.input_path) and self.input_kind == InputKind.NONE,
+        )
 
         model.bind(
             "max_video_frames_input",
             lambda: str(self._selected_video_frame_limit()),
             self._set_max_video_frames_input,
         )
-        model.bind_func("video_total_frames_max", lambda: str(max(1, self.video_total_frames)))
+        model.bind_func(
+            "video_total_frames_max", lambda: str(max(1, self.video_total_frames))
+        )
         model.bind_func("frame_limit_text", self._frame_limit_text)
         model.bind(
             "playback_fps",
             lambda: f"{self.playback_fps:.1f}",
             self._set_playback_fps,
         )
-        model.bind_func("source_fps_text", lambda: f"Detected Source FPS: {self.source_fps:.2f}")
-        model.bind_func("video_total_frames_text", lambda: f"Total Frames in Video: {self.video_total_frames}")
+        model.bind_func(
+            "source_fps_text", lambda: f"Detected Source FPS: {self.source_fps:.2f}"
+        )
+        model.bind_func(
+            "video_total_frames_text",
+            lambda: f"Total Frames in Video: {self.video_total_frames}",
+        )
 
         model.bind_func("show_processing", lambda: self.stage == Stage.PROCESSING)
         model.bind_func("processing_status_text", self._job_status_text)
@@ -230,29 +258,45 @@ class SharpVideoPanel(lf.ui.Panel):
         model.bind_func("processing_progress_pct", self._job_progress_pct)
 
         model.bind_func("show_actions", lambda: self.stage in {Stage.IDLE, Stage.ERROR})
-        model.bind_func("show_load_cached", lambda: self.input_kind == InputKind.VIDEO and self.cached_output_count > 0)
+        model.bind_func(
+            "show_load_cached",
+            lambda: self.input_kind == InputKind.VIDEO and self.cached_output_count > 0,
+        )
         model.bind_func("load_cached_label", self._load_cached_label)
         model.bind_func("process_button_label", self._process_button_label)
-        model.bind_func("show_error", lambda: self.stage == Stage.ERROR and bool(self.error_message))
+        model.bind_func(
+            "show_error", lambda: self.stage == Stage.ERROR and bool(self.error_message)
+        )
         model.bind_func("error_text", lambda: self.error_message)
 
-        model.bind_func("show_video_result", lambda: bool(self.ply_files) and self.input_kind == InputKind.VIDEO)
+        model.bind_func(
+            "show_video_result",
+            lambda: bool(self.ply_files) and self.input_kind == InputKind.VIDEO,
+        )
         model.bind_func("result_frames_text", lambda: f"Frames: {len(self.ply_files)}")
-        model.bind_func("play_button_label", lambda: "Pause" if self.is_playing else "Play")
+        model.bind_func(
+            "play_button_label", lambda: "Pause" if self.is_playing else "Play"
+        )
         model.bind_func("show_play_controls", lambda: len(self.ply_files) > 1)
         model.bind(
             "current_frame_idx",
             lambda: str(self.current_frame_idx if self.ply_files else 0),
             self._set_current_frame_idx,
         )
-        model.bind_func("playback_frame_slider_max", lambda: str(max(0, len(self.ply_files) - 1)))
+        model.bind_func(
+            "playback_frame_slider_max", lambda: str(max(0, len(self.ply_files) - 1))
+        )
         model.bind_func("current_frame_label", self._current_frame_label)
 
-        model.bind_func("show_image_result", lambda: bool(self.ply_files) and self.input_kind == InputKind.IMAGE)
+        model.bind_func(
+            "show_image_result",
+            lambda: bool(self.ply_files) and self.input_kind == InputKind.IMAGE,
+        )
         model.bind_func("image_complete_message", lambda: self.image_complete_message)
 
         model.bind_event("select_video", self._on_select_video)
         model.bind_event("select_image", self._on_select_image)
+        model.bind_event("apply_input_path", self._on_apply_input_path)
         model.bind_event("clear_input", self._on_clear_input)
         model.bind_event("load_cached_output", self._on_load_cached_output)
         model.bind_event("do_process_media", self._on_process_media)
@@ -447,7 +491,9 @@ class SharpVideoPanel(lf.ui.Panel):
                 self.source_fps = result.fps
                 self.playback_fps = result.fps
 
-            self.is_playing = self.input_kind == InputKind.VIDEO and len(self.ply_files) > 1
+            self.is_playing = (
+                self.input_kind == InputKind.VIDEO and len(self.ply_files) > 1
+            )
             self.stage = Stage.PLAYING if self.is_playing else Stage.IDLE
             if self.input_kind == InputKind.IMAGE:
                 self.image_complete_message = "Processing completed."
@@ -458,6 +504,7 @@ class SharpVideoPanel(lf.ui.Panel):
                 self._update_scene_frame(0)
 
             threading.Thread(target=self._preload_frames, daemon=True).start()
+
         else:
             self.error_message = result.error or "Processing failed"
             self.stage = Stage.ERROR
@@ -484,6 +531,7 @@ class SharpVideoPanel(lf.ui.Panel):
         del handle, event, args
         selected = lf.ui.open_video_file_dialog()
         if selected:
+            self.input_path_draft = selected
             self._set_input_path(selected)
             self._dirty()
 
@@ -491,17 +539,26 @@ class SharpVideoPanel(lf.ui.Panel):
         del handle, event, args
         selected = lf.ui.open_image_dialog(self._input_start_dir())
         if selected:
+            self.input_path_draft = selected
             self._set_input_path(selected)
             self._dirty()
 
+    def _on_apply_input_path(self, handle, event, args):
+        del handle, event, args
+        self._set_input_path(self.input_path_draft)
+        self._dirty()
+
     def _on_clear_input(self, handle, event, args):
         del handle, event, args
+        self.input_path_draft = ""
         self._set_input_path("")
         self._dirty()
 
     def _on_load_cached_output(self, handle, event, args):
         del handle, event, args
-        loaded = self._load_existing_output(frame_limit=self._selected_video_frame_limit())
+        loaded = self._load_existing_output(
+            frame_limit=self._selected_video_frame_limit()
+        )
         if not loaded:
             self.error_message = "Could not load cached frames from disk."
             self.stage = Stage.ERROR
@@ -589,7 +646,9 @@ class SharpVideoPanel(lf.ui.Panel):
 
         input_kind = self._detect_input_kind(self.input_path)
         if input_kind is None:
-            self.error_message = "Unsupported file type. Select an .mp4 video or supported image file."
+            self.error_message = (
+                "Unsupported file type. Select an .mp4 video or supported image file."
+            )
             self.stage = Stage.ERROR
             return
 
@@ -624,6 +683,7 @@ class SharpVideoPanel(lf.ui.Panel):
 
     def _set_input_path(self, input_path: str):
         normalized_path = input_path.strip()
+        self.input_path_draft = normalized_path
         if not normalized_path:
             self.input_path = ""
             self.input_kind = InputKind.NONE
@@ -643,7 +703,9 @@ class SharpVideoPanel(lf.ui.Panel):
         self.input_path = normalized_path
         if detected_kind is None:
             self.input_kind = InputKind.NONE
-            self.error_message = "Unsupported file type. Use .mp4 or a supported image file."
+            self.error_message = (
+                "Unsupported file type. Use .mp4 or a supported image file."
+            )
             self.cached_output_count = 0
             return
 
@@ -659,6 +721,9 @@ class SharpVideoPanel(lf.ui.Panel):
             return
         if self.stage == Stage.ERROR:
             self.stage = Stage.IDLE
+
+    def _set_input_path_draft(self, input_path: str):
+        self.input_path_draft = input_path.strip()
 
     def _reset_result_state(self):
         self.ply_files = []
@@ -689,7 +754,10 @@ class SharpVideoPanel(lf.ui.Panel):
                 raise RuntimeError("Unable to detect total frame count for this video")
             self.source_fps = fps if fps > 0 else self.source_fps
             self.video_total_frames = total_frames
-            if self.max_video_frames_input < 1 or self.max_video_frames_input > total_frames:
+            if (
+                self.max_video_frames_input < 1
+                or self.max_video_frames_input > total_frames
+            ):
                 self.max_video_frames_input = total_frames
         except Exception as exc:
             self.video_total_frames = 1
@@ -700,7 +768,11 @@ class SharpVideoPanel(lf.ui.Panel):
         self.cached_output_count = self._existing_output_count()
 
     def _try_autoload_existing_output(self) -> bool:
-        frame_limit = self._selected_video_frame_limit() if self.input_kind == InputKind.VIDEO else None
+        frame_limit = (
+            self._selected_video_frame_limit()
+            if self.input_kind == InputKind.VIDEO
+            else None
+        )
         loaded = self._load_existing_output(frame_limit=frame_limit)
         if loaded:
             output_dir = self._expected_output_dir()
@@ -740,6 +812,19 @@ class SharpVideoPanel(lf.ui.Panel):
         threading.Thread(target=self._preload_frames, daemon=True).start()
         return True
 
+    def _preload_frames(self):
+        count = 0
+        for ply_path in self.ply_files:
+            if count >= self.cache_limit:
+                break
+            if ply_path in self.frame_cache:
+                continue
+            try:
+                self.frame_cache[ply_path] = sharp_processor.load_gaussian_ply(ply_path)
+                count += 1
+            except Exception:
+                pass
+
     def _existing_output_count(self) -> int:
         return len(self._existing_output_files())
 
@@ -765,23 +850,13 @@ class SharpVideoPanel(lf.ui.Panel):
         return []
 
     def _expected_output_dir(self) -> Optional[Path]:
-        if self.input_kind not in {InputKind.VIDEO, InputKind.IMAGE} or not self.input_path:
+        if (
+            self.input_kind not in {InputKind.VIDEO, InputKind.IMAGE}
+            or not self.input_path
+        ):
             return None
         input_file = Path(self.input_path)
         return input_file.parent / f"{input_file.stem}_gaussians"
-
-    def _preload_frames(self):
-        count = 0
-        for ply_path in self.ply_files:
-            if count >= self.cache_limit:
-                break
-            if ply_path in self.frame_cache:
-                continue
-            try:
-                self.frame_cache[ply_path] = sharp_processor.load_gaussian_ply(ply_path)
-                count += 1
-            except Exception:
-                pass
 
     def _update_scene_frame(self, idx, node_name=None):
         if not self.ply_files:

@@ -22,6 +22,12 @@
     <button class="btn btn--full sharp-btn" data-event-click="select_image">Select Image File</button>
     <button class="btn btn--full sharp-btn sharp-btn--secondary" data-event-click="clear_input">Clear</button>
 
+    <span class="path-label text-muted">Manual Path</span>
+    <div class="path-edit-row">
+      <input type="text" class="mp-url-input sharp-path-input" data-value="input_path_draft" />
+      <button class="btn btn--full sharp-btn" data-event-click="apply_input_path">Apply Path</button>
+    </div>
+
     <span class="sharp-help text-muted">Supported: .mp4, .jpg, .jpeg, .png, .bmp, .tif, .tiff, .webp, .heic</span>
     <span class="sharp-meta text-default">Detected Type: {{detected_type_text}}</span>
     <span class="path-label text-muted">Selected Path</span>
