@@ -11,7 +11,7 @@ dependencies = [
   "plyfile",
   "scipy",
   "timm",
-  "torch==2.7.1+cu128",
+  "torch==2.13.0",
   "torchvision==0.22.1+cu128",
 ]
 
